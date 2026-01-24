@@ -1,0 +1,102 @@
+import logging
+import requests
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import Dict
+
+# Setup logging to see Arduino hits in your terminal
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+app = FastAPI(title="Rehab AI Monitor")
+
+# Enable CORS for ReactJS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Data Model for Arduino
+class SensorData(BaseModel):
+    heart_rate: int
+    wrist_angle: float
+    movement_intensity: float
+
+# Internal Storage (Latest Snapshot)
+latest_rehab_data = {
+    "heart_rate": 0,
+    "wrist_angle": 0,
+    "movement_intensity": 0,
+    "risk_level": "Low",
+    "ai_summary": "System initialized. Waiting for sensor data...",
+    "status": "idle"
+}
+
+def calculate_risk(hr: int, angle: float) -> str:
+    """Logical assessment based on safety thresholds."""
+    if hr > 120 or hr < 40:
+        return "High (Danger)"
+    elif hr > 100 or angle > 45:
+        return "Moderate (Caution)"
+    return "Low (Safe)"
+
+def get_gemma_recommendation(hr: int, angle: float, risk: str) -> str:
+    """Requests a conclusion from local Gemma 3:1b model."""
+    url = "http://localhost:11434/api/generate"
+    
+    # Prompt optimized for Gemma 3 instruction tuning
+    prompt = (
+        f"Context: Physical therapy monitoring. "
+        f"Data: Heart Rate {hr} BPM, Wrist Angle {angle}°, Risk: {risk}. "
+        f"Task: Provide a 2-sentence medical conclusion and one specific exercise tip. "
+        f"Tone: Encouraging and professional."
+    )
+    
+    try:
+        payload = {
+            "model": "gemma3:1b",
+            "prompt": prompt,
+            "stream": False,
+            "options": {"num_predict": 100} # Keep response short/fast
+        }
+        response = requests.post(url, json=payload, timeout=5)
+        return response.json().get("response", "Keep up the steady progress!").strip()
+    except Exception as e:
+        logger.error(f"Ollama Error: {e}")
+        return "Exercise within your comfort zone and maintain steady breathing."
+
+@app.get("/")
+def health_check():
+    return {"status": "Online", "model": "Gemma 3:1b"}
+
+@app.post("/update-sensors")
+async def update_sensors(data: SensorData):
+    global latest_rehab_data
+    
+    # Debug print to terminal
+    logger.info(f"RECEIVED: HR={data.heart_rate} | Angle={data.wrist_angle}")
+    
+    risk = calculate_risk(data.heart_rate, data.wrist_angle)
+    summary = get_gemma_recommendation(data.heart_rate, data.wrist_angle, risk)
+    
+    latest_rehab_data = {
+        "heart_rate": data.heart_rate,
+        "wrist_angle": data.wrist_angle,
+        "movement_intensity": data.movement_intensity,
+        "risk_level": risk,
+        "ai_summary": summary,
+        "status": "active"
+    }
+    return {"message": "Data processed", "risk": risk}
+
+@app.get("/get-rehab-status")
+async def get_status():
+    return latest_rehab_data
+
+if __name__ == "__main__":
+    import uvicorn
+    # Use 0.0.0.0 so Arduino can find the server on the network
+    uvicorn.run(app, host="0.0.0.0", port=8000)
